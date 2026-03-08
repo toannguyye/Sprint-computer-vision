@@ -37,22 +37,24 @@ DETECTION_CONF        = 0.15
 
 # ── ROI Cropping ─────────────────────────────────────────────────────────────
 ROI_SWITCH_IMGSZ      = 640
-CROP_W_MULTIPLIER     = 1.5
-CROP_H_MULTIPLIER     = 1.5
+CROP_W_MULTIPLIER     = 0.9    # YOLO needs visual context around the person
+CROP_H_MULTIPLIER     = 0.9    # need to see feet touching ground
 CROP_MIN_PX           = 80
 MAX_JUMP_PX           = 200
 MAX_JUMP_MULTIPLIER   = 0.5
 MAX_JUMP_FLOOR_PX     = 20
 MAX_LOST_FRAMES       = 30
+MAX_BOX_SHIFT_PX      = 1      # max pixels the crop anchor (last_box_full) can move per frame
+MAX_DIST_CHANGE_PER_FRAME = 0.15  # max metres the smoothed distance can change per frame
 
 # ── ROI imgsz Escalation ─────────────────────────────────────────────────────
 ROI_IMGSZ_START       = 320
 ROI_IMGSZ_MAX         = 640
 
 # ── Smoothing ────────────────────────────────────────────────────────────────
-FOOT_SMOOTHING_ALPHA     = 0.2
+FOOT_SMOOTHING_ALPHA     = 0.05
 DISTANCE_SMOOTHING_ALPHA = 0.1
-FINISH_CONFIRM_FRAMES    = 30
+FINISH_CONFIRM_FRAMES    = 15
 TIMER_START_THRESHOLD_M  = 0.0
 
 # ── GUI ──────────────────────────────────────────────────────────────────────
@@ -995,6 +997,10 @@ def run_tracking(model, video_path, src_points, distance_m, max_athletes,
                         old_d = smooth_dist[tid]
                         smoothed_d = DISTANCE_SMOOTHING_ALPHA * world_y + \
                                      (1 - DISTANCE_SMOOTHING_ALPHA) * old_d
+                        # Clamp: distance can't change faster than physically possible
+                        delta = smoothed_d - old_d
+                        if abs(delta) > MAX_DIST_CHANGE_PER_FRAME:
+                            smoothed_d = old_d + MAX_DIST_CHANGE_PER_FRAME * (1 if delta > 0 else -1)
                     else:
                         smoothed_d = world_y
                     smooth_dist[tid] = smoothed_d
@@ -1211,12 +1217,25 @@ def run_tracking(model, video_path, src_points, distance_m, max_athletes,
                 ff_x1, ff_y1, ff_x2, ff_y2 = best["bbox"]
                 conf = best["conf"]
 
+                # Pixel position clamping — prevent crop from jumping to bystander
+                if roi_tid in last_box_full:
+                    old_x1, old_y1, old_x2, old_y2 = last_box_full[roi_tid]
+                    def _clamp(old, new, limit):
+                        delta = new - old
+                        if abs(delta) > limit:
+                            return old + limit * (1 if delta > 0 else -1)
+                        return new
+                    ff_x1 = _clamp(old_x1, ff_x1, MAX_BOX_SHIFT_PX)
+                    ff_y1 = _clamp(old_y1, ff_y1, MAX_BOX_SHIFT_PX)
+                    ff_x2 = _clamp(old_x2, ff_x2, MAX_BOX_SHIFT_PX)
+                    ff_y2 = _clamp(old_y2, ff_y2, MAX_BOX_SHIFT_PX)
+
                 roi_state["frames_lost"] = 0
                 roi_state["prev_foot"] = (foot_x, foot_y)
                 last_box_full[roi_tid] = (ff_x1, ff_y1, ff_x2, ff_y2)
                 last_conf[roi_tid] = conf
 
-                # Foot position (full-frame)
+                # Foot position (full-frame) — uses clamped box
                 raw_fx = (ff_x1 + ff_x2) / 2
                 raw_fy = float(ff_y2)
 
@@ -1239,6 +1258,10 @@ def run_tracking(model, video_path, src_points, distance_m, max_athletes,
                     old_d = smooth_dist[roi_tid]
                     smoothed_d = DISTANCE_SMOOTHING_ALPHA * world_y + \
                                  (1 - DISTANCE_SMOOTHING_ALPHA) * old_d
+                    # Clamp: distance can't change faster than physically possible
+                    delta = smoothed_d - old_d
+                    if abs(delta) > MAX_DIST_CHANGE_PER_FRAME:
+                        smoothed_d = old_d + MAX_DIST_CHANGE_PER_FRAME * (1 if delta > 0 else -1)
                 else:
                     smoothed_d = world_y
                 smooth_dist[roi_tid] = smoothed_d
@@ -1407,10 +1430,10 @@ def _draw_all_overlays(frame, locked_ids, last_draw_info, last_box_full,
                         timer_text += f" cross@{cross_elapsed:.3f}s"
                     timer_color = (0, 255, 255)
 
-            y_offset = 60 + list(locked_ids.keys()).index(tid) * 30
+            y_offset = 80 + list(locked_ids.keys()).index(tid) * 50
             cv2.putText(frame, timer_text, (10, y_offset),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                        _dim(timer_color, alpha), 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2,
+                        _dim(timer_color, alpha), 3)
 
     # ROI crop rectangle
     if in_roi_mode and athlete_roi:
